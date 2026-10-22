@@ -28,7 +28,7 @@ echo "→ Python-окружение"
 
 echo "→ HUD (круг на экране)"
 if command -v swiftc >/dev/null; then
-  swiftc -O "$HERE/hud.swift" -o "$HERE/JarvisHUD" || echo "  HUD не собрался — Джарвис будет работать без него"
+  swiftc -O "$HERE"/hud/*.swift -o "$HERE/JarvisHUD" || echo "  HUD не собрался — Джарвис будет работать без него"
 else
   echo "  swiftc не найден (xcode-select --install) — Джарвис будет работать без HUD"
 fi

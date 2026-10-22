@@ -6,6 +6,7 @@ Usage:
   jarvis.py --enter     trigger with Enter instead of claps (for testing)
   jarvis.py --levels    print mic levels (to tune clap thresholds)
   jarvis.py --say TEXT  just speak a phrase
+  jarvis.py --settings  open the Settings window
   jarvis.py ctl ...     project control (same as ./jarvisctl)
 """
 import asyncio
@@ -33,6 +34,22 @@ CACHE = HERE / "cache"
 if not (HERE / "config.json").exists():
     (HERE / "config.json").write_text((HERE / "config.example.json").read_text(encoding="utf-8"), encoding="utf-8")
 CFG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+_cfg_mtime = (HERE / "config.json").stat().st_mtime
+
+
+def reload_config():
+    """Picks up changes made in the Settings window without a restart."""
+    global _cfg_mtime
+    try:
+        m = (HERE / "config.json").stat().st_mtime
+        if m != _cfg_mtime:
+            new = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
+            CFG.clear()
+            CFG.update(new)
+            _cfg_mtime = m
+            log("Настройки обновлены")
+    except Exception as e:
+        log("Не смог прочитать config.json:", e)
 RATE = 16000
 BLOCK = 320  # 20 ms
 
@@ -544,7 +561,7 @@ def record_phrase(max_wait=5.0, max_len=7.0, silence=0.9):
 
 
 def transcribe(audio, projs):
-    hint = ("Просыпайся, папочка вернулся. Проекты: "
+    hint = (" ".join(wake_words()).capitalize() + ". Проекты: "
             + ", ".join(list(projs) + [a for v in CFG["aliases"].values() for a in v])) if projs else None
     hud("thinking")
     segs, _ = whisper().transcribe(audio, language="ru", initial_prompt=hint, beam_size=1, vad_filter=True)
@@ -602,21 +619,23 @@ def speak_bg(text):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-WAKE_WORDS = ["просыпайся", "папочка", "вернулся"]
+def wake_words():
+    return CFG.get("wake_words") or ["просыпайся", "папочка", "вернулся"]
 awake_until = 0.0
 
 
 def strip_wake(text):
     """'Просыпайся, папочка вернулся, открой шоп' -> (True, 'открой шоп').
-    Needs at least 2 of the 3 wake words, in any wording close enough."""
+    Needs at least 2 of the wake words (all of them if there are fewer), in any wording close enough."""
     words = text.split()
     found, last = 0, -1
-    for w in WAKE_WORDS:
+    wake = wake_words()
+    for w in wake:
         for i, t in enumerate(words[:8]):
             if word_sim(norm(w), norm(t)) >= 0.7:
                 found, last = found + 1, max(last, i)
                 break
-    if found < 2:
+    if found < min(2, len(wake)):
         return False, text
     return True, " ".join(words[last + 1:]).strip(" ,.!")
 
@@ -896,6 +915,7 @@ def listen_claps():
         if PAUSED.exists():  # paused: microphone closed (the orange mic icon goes away) until resumed or 'Слушать'
             log("Пауза: микрофон выключен")
             while PAUSED.exists() and not TRIGGER.exists():
+                reload_config()
                 if CANCEL.exists():
                     CANCEL.unlink(missing_ok=True)
                     stop_speaking()
@@ -917,6 +937,8 @@ def listen_claps():
                     if n == 49 and det.noise == 0:
                         log("ВНИМАНИЕ: микрофон молчит — нет доступа к микрофону?")
                     continue
+                if n % 50 == 0:
+                    reload_config()
                 if n % 10 == 0 and CANCEL.exists():  # stop pressed while idle: silence any read-out
                     CANCEL.unlink(missing_ok=True)
                     stop_speaking()
@@ -986,6 +1008,9 @@ def main():
         except Cancelled:
             pass
         hud("hide")
+        return
+    if args[:1] == ["--settings"]:
+        hud("settings")
         return
     if args[:1] == ["ctl"]:
         ctl(args[1:])

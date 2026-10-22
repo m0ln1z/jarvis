@@ -3,7 +3,7 @@
 // Reads commands from a FIFO, one per line: "<state>\t<text>", state = listening | thinking | speaking | hide.
 // Talks back to Jarvis through files next to the FIFO: .trigger (listen now), .paused (ignore claps),
 // .cancel (stop whatever Jarvis is doing — a click on the circle).
-// Build: swiftc -O hud.swift -o JarvisHUD
+// Build: swiftc -O hud/*.swift -o JarvisHUD
 import AppKit
 import Carbon
 import QuartzCore
@@ -208,8 +208,9 @@ final class MenuBar: NSObject, NSMenuDelegate {
         menu.addItem(withTitle: "Джарвис", action: nil, keyEquivalent: "").isEnabled = false
         menu.addItem(status)
         menu.addItem(.separator())
-        add("Слушать  (\(hotkeyName) — из любого приложения)", #selector(listen), "")
-        add("Отменить — замолчать и уснуть  (\(hotkeyName) ещё раз)", #selector(cancel), "")
+        listenItem = add("", #selector(listen), "")
+        cancelItem = add("", #selector(cancel), "")
+        updateTitles()
         add("Остановить Claude в текущем проекте", #selector(stopClaude), "")
         menu.addItem(pause)
         pause.target = self
@@ -224,10 +225,19 @@ final class MenuBar: NSObject, NSMenuDelegate {
         set("hide")
     }
 
-    func add(_ title: String, _ action: Selector, _ key: String) {
+    var listenItem: NSMenuItem?, cancelItem: NSMenuItem?
+
+    @discardableResult
+    func add(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
         i.target = self
         menu.addItem(i)
+        return i
+    }
+
+    func updateTitles() {
+        listenItem?.title = "Слушать  (\(hotkeyName) — из любого приложения)"
+        cancelItem?.title = "Отменить — замолчать и уснуть  (\(hotkeyName) ещё раз)"
     }
 
     /// Small reactor: outline when asleep, colored when busy.
@@ -261,7 +271,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
         item.button?.alphaValue = paused && state == "hide" ? 0.45 : 1
     }
 
-    func menuWillOpen(_ menu: NSMenu) {  // the pause file may have been changed elsewhere
+    func menuWillOpen(_ menu: NSMenu) {  // the pause file or the hotkey may have been changed elsewhere
+        updateTitles()
         pause.state = FileManager.default.fileExists(atPath: dir + "/.paused") ? .on : .off
     }
 
@@ -281,7 +292,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
         set("hide")
     }
 
-    @objc func settings() { run("/usr/bin/open", ["-t", dir + "/config.json"]) }
+    @objc func settings() { SettingsWindow.show(dir: dir) }
     @objc func showLog() { run("/usr/bin/open", ["-a", "Console", dir + "/jarvis.log"]) }
     @objc func restart() { run("/bin/launchctl", ["kickstart", "-k", label]) }
     @objc func quit() { run("/bin/launchctl", ["bootout", label]) }
@@ -333,11 +344,18 @@ var hotkeyName = "⌥J"
 var hotkeyRef: EventHotKeyRef?
 var onHotkey: () -> Void = {}
 
+var hotkeyHandlerInstalled = false
+
+/// (Re)binds the global hotkey; safe to call again after the setting changes.
 func registerHotkey(_ spec: String) {
     guard let (code, mods, name) = parseHotkey(spec) else { return }
     hotkeyName = name
-    var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-    InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in onHotkey(); return noErr }, 1, &type, nil, nil)
+    if !hotkeyHandlerInstalled {
+        var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in onHotkey(); return noErr }, 1, &type, nil, nil)
+        hotkeyHandlerInstalled = true
+    }
+    if let ref = hotkeyRef { UnregisterEventHotKey(ref); hotkeyRef = nil }
     let id = EventHotKeyID(signature: OSType(0x4A52_5653), id: 1)  // 'JRVS'
     let status = RegisterEventHotKey(code, mods, id, GetApplicationEventTarget(), 0, &hotkeyRef)
     let msg = status == noErr ? "горячая клавиша \(name) готова" : "горячая клавиша \(name) занята другим приложением (\(status))"
@@ -363,7 +381,11 @@ Thread {
         let parts = String(cString: line!).trimmingCharacters(in: .newlines)
             .split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
         let state = parts.first ?? "hide", text = parts.count > 1 ? parts[1] : ""
-        DispatchQueue.main.async { hud.apply(state, text); bar.set(state) }
+        DispatchQueue.main.async {
+            if state == "settings" { SettingsWindow.show(dir: jarvisDir); return }
+            hud.apply(state, text)
+            bar.set(state)
+        }
     }
 }.start()
 
