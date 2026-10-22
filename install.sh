@@ -26,12 +26,16 @@ echo "→ Python-окружение"
 "$HERE/.venv/bin/pip" install -q --upgrade pip
 "$HERE/.venv/bin/pip" install -q -r "$HERE/requirements.txt"
 
-echo "→ HUD (круг на экране)"
-if command -v swiftc >/dev/null; then
+echo "→ HUD (круг на экране, иконка в строке меню, настройки)"
+if [[ -x "$HERE/JarvisHUD" ]]; then
+  echo "  готовая сборка из релиза"
+elif command -v swiftc >/dev/null; then
   swiftc -O "$HERE"/hud/*.swift -o "$HERE/JarvisHUD" || echo "  HUD не собрался — Джарвис будет работать без него"
 else
   echo "  swiftc не найден (xcode-select --install) — Джарвис будет работать без HUD"
 fi
+# files downloaded from the internet are quarantined; the user chose to install them
+xattr -dr com.apple.quarantine "$HERE" 2>/dev/null || true
 
 [[ -f "$HERE/config.json" ]] || cp "$HERE/config.example.json" "$HERE/config.json"
 chmod +x "$HERE/run.sh" "$HERE/jarvisctl"
