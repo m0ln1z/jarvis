@@ -1016,8 +1016,6 @@ def listen_claps():
     def cb(indata, frames, t, status):
         q.put(indata[:, 0].copy())
 
-    for f in (LISTENING, SPEAKING, CANCEL, TRIGGER):  # leftovers from a crash
-        f.unlink(missing_ok=True)
     start_hud()
     threading.Thread(target=brain.ready, daemon=True).start()  # warm up the brain
     threading.Thread(target=watch_dialogs, daemon=True).start()
@@ -1133,11 +1131,16 @@ def main():
     if args[:1] == ["--levels"]:
         show_levels()
         return
+    for f in (LISTENING, SPEAKING, CANCEL, TRIGGER):  # leftovers from a crash or a click while Jarvis was down
+        f.unlink(missing_ok=True)
     whisper()  # load model up front so the first answer is fast
     for p in CFG["phrases"].values():  # pre-cache phrases
         if "{" not in p:
             synth(p)
-    speak(CFG["phrases"]["ready"])
+    try:
+        speak(CFG["phrases"]["ready"])
+    except Cancelled:  # stop pressed during the greeting
+        CANCEL.unlink(missing_ok=True)
     if args[:1] == ["--enter"]:
         while True:
             input("Enter — запуск диалога")
