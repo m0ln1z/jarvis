@@ -3,6 +3,8 @@ __pycache__/
 cache/
 brain/
 samples/
+JarvisHUD
+.hud
 .DS_Store
 
 # personal: keys, own settings, logs, runtime state

@@ -26,6 +26,13 @@ echo "→ Python-окружение"
 "$HERE/.venv/bin/pip" install -q --upgrade pip
 "$HERE/.venv/bin/pip" install -q -r "$HERE/requirements.txt"
 
+echo "→ HUD (круг на экране)"
+if command -v swiftc >/dev/null; then
+  swiftc -O "$HERE/hud.swift" -o "$HERE/JarvisHUD" || echo "  HUD не собрался — Джарвис будет работать без него"
+else
+  echo "  swiftc не найден (xcode-select --install) — Джарвис будет работать без HUD"
+fi
+
 [[ -f "$HERE/config.json" ]] || cp "$HERE/config.example.json" "$HERE/config.json"
 chmod +x "$HERE/run.sh" "$HERE/jarvisctl"
 ln -sf "$HERE/run.sh" "$(brew --prefix)/bin/jarvis"

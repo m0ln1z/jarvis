@@ -108,11 +108,35 @@ def synth(text):
 
 
 SPEAKING = HERE / ".speaking"
+HUD_FIFO = HERE / ".hud"
+
+
+def hud(state, text=""):
+    """Shows the on-screen reactor: listening | thinking | speaking | hide. Silently does nothing without HUD."""
+    try:
+        fd = os.open(HUD_FIFO, os.O_WRONLY | os.O_NONBLOCK)
+        try:
+            os.write(fd, f"{state}\t{' '.join(text.split())[:300]}\n".encode())
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def start_hud():
+    binary = HERE / "JarvisHUD"
+    if not binary.exists():
+        log("HUD не собран (нужен swiftc) — работаю без него")
+        return
+    if not HUD_FIFO.exists():
+        os.mkfifo(HUD_FIFO)
+    subprocess.Popen([str(binary), str(HUD_FIFO)])
 
 
 def speak(text):
     """Plays the phrase; a clap during playback stops it. Returns True if interrupted."""
     out = synth(text)
+    hud("speaking", text)
     SPEAKING.touch()
     try:
         p = subprocess.Popen(["afplay", str(out)] if out else ["say", "-v", "Milena", text])
@@ -462,6 +486,7 @@ def whisper():
 
 def record_phrase(max_wait=5.0, max_len=7.0, silence=0.9):
     """Records until the speaker goes quiet. Returns float32 audio or None."""
+    hud("listening")
     frames, started, quiet_since = [], False, None
     noise = []
     t0 = time.time()
@@ -497,6 +522,7 @@ def record_phrase(max_wait=5.0, max_len=7.0, silence=0.9):
 def transcribe(audio, projs):
     hint = ("Просыпайся, папочка вернулся. Проекты: "
             + ", ".join(list(projs) + [a for v in CFG["aliases"].values() for a in v])) if projs else None
+    hud("thinking")
     segs, _ = whisper().transcribe(audio, language="ru", initial_prompt=hint, beam_size=1, vad_filter=True)
     text = " ".join(s.text for s in segs).strip()
     if re.search(HALLUCINATIONS, text, re.I):
@@ -635,6 +661,7 @@ def handle_command(text=None, greet=True):
             text = None
             continue
         subprocess.Popen(["afplay", "/System/Library/Sounds/Tink.aiff"])  # 'thinking…'
+        hud("thinking", f"«{text}»")
         answer = think(text)
         log(f"Джарвис: «{answer}»")
         if speak(answer):
@@ -824,6 +851,7 @@ def listen_claps():
     def cb(indata, frames, t, status):
         q.put(indata[:, 0].copy())
 
+    start_hud()
     threading.Thread(target=watch_dialogs, daemon=True).start()
     while True:
         det = ClapDetector()
@@ -855,6 +883,8 @@ def listen_claps():
                 handle_dialog(*dialog)
             except Exception as e:
                 log("Ошибка:", e)
+            finally:
+                hud("hide")
             continue
         log("Хлопок!")
         stop_speaking()
@@ -862,6 +892,8 @@ def listen_claps():
             on_clap()
         except Exception as e:
             log("Ошибка:", e)
+        finally:
+            hud("hide")
 
 
 def show_levels():
@@ -878,6 +910,7 @@ def main():
     args = sys.argv[1:]
     if args[:1] == ["--say"]:
         speak(" ".join(args[1:]))
+        hud("hide")
         return
     if args[:1] == ["ctl"]:
         ctl(args[1:])
