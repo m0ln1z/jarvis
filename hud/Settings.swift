@@ -11,6 +11,8 @@ final class SettingsModel: ObservableObject {
     @Published var wakeWords = ""
     @Published var awakeMinutes = 15.0
     @Published var brainModel = "haiku"
+    @Published var asr = "mlx"
+    @Published var listeningSound = true
     @Published var roots: [String] = []
     @Published var exclude = ""
 
@@ -63,6 +65,8 @@ final class SettingsModel: ObservableObject {
         wakeWords = (cfg["wake_words"] as? [String] ?? ["просыпайся", "папочка", "вернулся"]).joined(separator: " ")
         awakeMinutes = cfg["awake_minutes"] as? Double ?? 15
         brainModel = cfg["brain_model"] as? String ?? "haiku"
+        asr = cfg["asr"] as? String ?? "mlx"
+        listeningSound = cfg["listening_sound"] as? Bool ?? true
         roots = cfg["projects_roots"] as? [String] ?? ["~/Desktop"]
         exclude = (cfg["exclude"] as? [String] ?? []).joined(separator: ", ")
         tts = cfg["tts"] as? String ?? "edge"
@@ -90,6 +94,8 @@ final class SettingsModel: ObservableObject {
         cfg["wake_words"] = list(wakeWords.lowercased(), separator: " ")
         cfg["awake_minutes"] = Int(awakeMinutes)
         cfg["brain_model"] = brainModel
+        cfg["asr"] = asr
+        cfg["listening_sound"] = listeningSound
         cfg["projects_roots"] = roots
         cfg["exclude"] = list(exclude, separator: ",")
         cfg["tts"] = tts
@@ -262,6 +268,13 @@ struct SettingsView: View {
                     Slider(value: $m.awakeMinutes, in: 1...60, step: 1)
                     Text("\(Int(m.awakeMinutes)) мин").monospacedDigit().frame(width: 60, alignment: .trailing)
                 }
+            }
+            Section("Распознавание речи") {
+                Picker("Движок", selection: $m.asr) {
+                    Text("MLX — быстро и точно (Apple Silicon)").tag("mlx")
+                    Text("faster-whisper — процессор, для Intel").tag("faster-whisper")
+                }
+                Toggle("Короткий звук вместо «Да, сэр?» (быстрее)", isOn: $m.listeningSound)
             }
             Section("Мозг") {
                 Picker("Модель", selection: $m.brainModel) {

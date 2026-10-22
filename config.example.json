@@ -53,5 +53,8 @@
     "папочка",
     "вернулся"
   ],
-  "brain_model": "haiku"
+  "brain_model": "haiku",
+  "asr": "mlx",
+  "mlx_model": "mlx-community/whisper-large-v3-turbo",
+  "listening_sound": true
 }

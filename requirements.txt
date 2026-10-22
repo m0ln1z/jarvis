@@ -2,3 +2,4 @@ numpy
 sounddevice
 edge-tts
 faster-whisper
+mlx-whisper; platform_machine == "arm64" and sys_platform == "darwin"

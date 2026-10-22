@@ -470,44 +470,95 @@ BRAIN_PROMPT = """Ты — Джарвис, голосовой ассистент
 
 Компьютером управляй через bash и osascript: приложения, сайты, поиск в браузере, громкость, музыка, \
 время, батарея и т.п. Действуй сразу, без лишних вопросов.
+Если владелец хочет, чтобы ты замолчал, выключился, ушёл спать или отстал — ответь очень коротко и допиши в \
+самом конце метку [SLEEP]: тогда ты действительно уснёшь до следующего хлопка.
 Перед необратимым (удаление файлов, git push, отправка сообщений, покупки, закрытие несохранённого) — \
 не делай, а спроси подтверждение одной фразой; владелец ответит следующей репликой.
 
 Проекты: {projects}
-Сейчас: {sessions}"""
+Перед каждой репликой владельца в квадратных скобках дано, какие проекты сейчас открыты."""
+
+
+class Brain:
+    """One long-running Claude process: no start-up cost per phrase, and it remembers the conversation.
+    A fresh conversation starts after Jarvis falls asleep."""
+
+    def __init__(self):
+        self.proc = None
+        self.events = queue.Queue()
+
+    def start(self):
+        prompt = BRAIN_PROMPT.format(ctl=HERE / "jarvisctl", roots=", ".join(CFG["projects_roots"]),
+                                     projects=", ".join(projects()))
+        (HERE / "brain").mkdir(exist_ok=True)
+        self.proc = subprocess.Popen(
+            ["claude", "-p", "--model", CFG.get("brain_model", "haiku"), "--input-format", "stream-json",
+             "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions",
+             "--append-system-prompt", prompt],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            cwd=str(HERE / "brain"))
+        self.model = CFG.get("brain_model", "haiku")
+        self.events = queue.Queue()
+        threading.Thread(target=self._read, args=(self.proc, self.events), daemon=True).start()
+
+    @staticmethod
+    def _read(proc, events):
+        for line in proc.stdout:
+            try:
+                events.put(json.loads(line))
+            except ValueError:
+                pass
+        events.put(None)  # process ended
+
+    def ready(self):
+        if not self.proc or self.proc.poll() is not None or self.model != CFG.get("brain_model", "haiku"):
+            self.stop()
+            self.start()
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            self.proc.kill()
+        self.proc = None
+
+    def ask(self, text):
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ctl(["sessions"])
+        for attempt in range(2):
+            self.ready()
+            msg = {"type": "user", "message": {"role": "user", "content": f"[{buf.getvalue().strip()}]\n{text}"}}
+            try:
+                self.proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+            except OSError:
+                self.stop()
+                continue
+            end = time.time() + 120
+            while time.time() < end:
+                if CANCEL.exists():
+                    self.stop()  # the only way to abort a running turn
+                    check_cancel()
+                try:
+                    e = self.events.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if e is None:
+                    break  # died: restart and retry once
+                if e.get("type") == "result":
+                    return (e.get("result") or "").strip() or "Готово, сэр."
+            self.stop()
+        return "Простите, сэр, что-то пошло не так."
+
+
+brain = Brain()
 
 
 def think(text):
-    """Asks the brain; returns the phrase to say. Keeps one conversation per wake-up."""
-    import io, contextlib
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        ctl(["sessions"])
-    st = load_state()
-    prompt = BRAIN_PROMPT.format(ctl=HERE / "jarvisctl", roots=", ".join(CFG["projects_roots"]), projects=", ".join(projects()), sessions=buf.getvalue().strip())
-    cmd = ["claude", "-p", "--model", CFG.get("brain_model", "haiku"), "--dangerously-skip-permissions",
-           "--output-format", "json", "--append-system-prompt", prompt]
-    if st.get("brain_session") and time.time() - st.get("brain_at", 0) < CFG.get("awake_minutes", 15) * 60:
-        cmd += ["--resume", st["brain_session"]]
-    (HERE / "brain").mkdir(exist_ok=True)
-    try:
-        p = subprocess.Popen(cmd + [text], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                             cwd=str(HERE / "brain"), stdin=subprocess.DEVNULL)
-        end = time.time() + 120
-        while p.poll() is None:
-            if CANCEL.exists() or time.time() > end:
-                p.kill()
-                check_cancel()
-                raise TimeoutError("мозг думал больше 2 минут")
-            time.sleep(0.2)
-        d = json.loads(p.stdout.read())
-    except Exception as e:
-        log("Мозг не ответил:", e)
-        return "Простите, сэр, что-то пошло не так."
-    st = load_state()
-    st["brain_session"], st["brain_at"] = d.get("session_id"), time.time()
-    save_state(st)
-    return (d.get("result") or "").strip() or "Готово, сэр."
+    """Asks the brain; returns (phrase to say, wants_sleep)."""
+    answer = brain.ask(text)
+    wants_sleep = "[SLEEP]" in answer
+    return answer.replace("[SLEEP]", "").strip(), wants_sleep
 
 
 # ---------- listening ----------
@@ -515,18 +566,49 @@ def think(text):
 _whisper = None
 
 
+def use_mlx():
+    if CFG.get("asr", "mlx") != "mlx":
+        return False
+    try:
+        import mlx_whisper  # noqa: F401  (Apple Silicon only)
+        return True
+    except ImportError:
+        return False
+
+
 def whisper():
+    """Loads the recognizer once (first load of the MLX model downloads ~1.6 GB)."""
     global _whisper
     if _whisper is None:
-        from faster_whisper import WhisperModel
         log("Загружаю модель распознавания…")
-        _whisper = WhisperModel(CFG["whisper_model"], device="cpu", compute_type="int8")
+        if use_mlx():
+            import mlx_whisper
+            mlx_whisper.transcribe(np.zeros(RATE, np.float32), path_or_hf_repo=CFG.get("mlx_model", MLX_MODEL), language="ru")
+            _whisper = "mlx"
+        else:
+            from faster_whisper import WhisperModel
+            _whisper = WhisperModel(CFG["whisper_model"], device="cpu", compute_type="int8")
     return _whisper
 
 
-def record_phrase(max_wait=5.0, max_len=7.0, silence=0.9):
-    """Records until the speaker goes quiet. Returns float32 audio or None."""
+MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
+
+
+LISTENING = HERE / ".listening"  # while it exists, answer read-outs wait instead of talking over the user
+
+
+def record_phrase(max_wait=5.0, max_len=7.0, silence=0.7):
+    """Records until the speaker goes quiet. Returns float32 audio or None.
+    Whatever plays while Jarvis itself is talking is thrown away, so he never 'hears' his own voice."""
     hud("listening")
+    LISTENING.touch()
+    try:
+        return _record(max_wait, max_len, silence)
+    finally:
+        LISTENING.unlink(missing_ok=True)
+
+
+def _record(max_wait, max_len, silence):
     frames, started, quiet_since = [], False, None
     noise = []
     t0 = time.time()
@@ -535,6 +617,9 @@ def record_phrase(max_wait=5.0, max_len=7.0, silence=0.9):
             b, _ = st.read(BLOCK)
             b = b[:, 0]
             check_cancel()
+            if SPEAKING.exists():  # someone (a read-out that had already started) is talking: start over
+                frames, started, quiet_since, noise, t0 = [], False, None, [], time.time()
+                continue
             rms = float(np.sqrt(np.mean(b ** 2)))
             now = time.time() - t0
             if len(noise) < 15:  # first 300 ms -> background level
@@ -564,8 +649,15 @@ def transcribe(audio, projs):
     hint = (" ".join(wake_words()).capitalize() + ". Проекты: "
             + ", ".join(list(projs) + [a for v in CFG["aliases"].values() for a in v])) if projs else None
     hud("thinking")
-    segs, _ = whisper().transcribe(audio, language="ru", initial_prompt=hint, beam_size=1, vad_filter=True)
-    text = " ".join(s.text for s in segs).strip()
+    w = whisper()
+    if w == "mlx":
+        import mlx_whisper
+        r = mlx_whisper.transcribe(audio, path_or_hf_repo=CFG.get("mlx_model", MLX_MODEL), language="ru",
+                                   initial_prompt=hint, condition_on_previous_text=False)
+        text = " ".join(seg["text"] for seg in r["segments"] if seg.get("no_speech_prob", 0) < 0.6).strip()
+    else:
+        segs, _ = w.transcribe(audio, language="ru", initial_prompt=hint, beam_size=1, vad_filter=True)
+        text = " ".join(seg.text for seg in segs).strip()
     if re.search(HALLUCINATIONS, text, re.I):
         log(f"Отброшено (глюк распознавания): «{text}»")
         return ""
@@ -579,9 +671,10 @@ HALLUCINATIONS = r"субтитр|редактор|корректор|продо
 OPEN_WORDS = r"открой|откро|открыл|открыть|\bсрой|\bкрой|\bотрой|запусти|перейди|переключи|проект|нужно|надо|хочу|слушай|давай|братан|джарвис"
 SHUT_UP = r"^\W*(замолчи|тихо|молчи|помолчи|хватит говорить|заткнись)\W*"
 STOP = r"^\W*(стоп|отмени|отмена|останови|остановись|прекрати)\W*$"
-SLEEP = (r"^\W*(?:(?:ну|всё|ничего|джарвис|ладно)\W+)*(выключись|выключайся|отключись|отключайся|выключи(?:ть)?|"
-         r"отключи(?:ть)?|спи|спать|иди спать|отбой|свободен|пока|ничего|всё|хватит|достаточно|спасибо)"
-         r"(?:\W+(?:сэр|джарвис|спасибо))*\W*$")  # the whole phrase, so 'выключи музыку' still goes to the brain
+SLEEP = (r"^\W*(?:(?:ну|всё|ничего|джарвис|ладно)\W+)*(выключи(?:ть)?|отключи(?:ть)?|спи|спать|пока|ничего|всё|"
+         r"хватит|достаточно|спасибо|свободен)(?:\W+(?:сэр|джарвис|спасибо))*\W*$")  # the whole phrase is just this
+SLEEP_ANYWHERE = (r"\b(выключись|выключайся|отключись|отключайся|отбой|иди спать|иди поспи|засыпай|уйди|отвали|"
+                  r"исчезни|не нужен|ты мне не нужен)\b")  # unambiguous even inside a long phrase
 JUST_OPEN = r"ничего|не надо|просто откр|пока нет|^\W*(нет|просто)\W*$"
 
 
@@ -643,6 +736,8 @@ def strip_wake(text):
 def go_to_sleep():
     global awake_until
     awake_until = 0.0
+    brain.stop()  # next wake-up starts a fresh conversation…
+    threading.Thread(target=brain.ready, daemon=True).start()  # …in an already running process
     log("Ухожу спать")
 
 
@@ -672,7 +767,10 @@ def handle_command(text=None, greet=True):
     st = load_state()
     current = st.get("current") if st.get("current") and alive(st["current"]) else None
     if text is None and greet:
-        speak(CFG["phrases"]["listening"])
+        if CFG.get("listening_sound", True):
+            subprocess.run(["afplay", "/System/Library/Sounds/Pop.aiff"])
+        else:
+            speak(CFG["phrases"]["listening"])
     for attempt in range(10):  # a short conversation: up to 10 exchanges
         if text is None:
             audio = record_phrase(max_wait=5.0, max_len=25.0, silence=0.8)
@@ -686,22 +784,29 @@ def handle_command(text=None, greet=True):
             t = text.lower()
             if not text:
                 return
-        if re.match(SLEEP, t):
+        if re.match(SLEEP, t) or re.search(SLEEP_ANYWHERE, t):
             go_to_sleep()
-            speak_bg(CFG["phrases"].get("sleep", "Как скажете, сэр."))
+            speak(CFG["phrases"].get("sleep", "Как скажете, сэр."))
             return
+        is_wake, rest = strip_wake(text)
+        if is_wake:  # the wake phrase said after 'Слушать' / the hotkey
+            if not rest:
+                speak(CFG["phrases"]["wake"])
+                text = None
+                continue
+            text, t = rest, rest.lower()
         if re.match(STOP, t):
             if current:
                 interrupt(current)
-                speak_bg(CFG["phrases"]["stopped"])
+                speak(CFG["phrases"]["stopped"])
             return
         name, task = split_command(text, projs)
         if task and len(task.split()) <= 6 and re.search(JUST_OPEN, task.lower()):
             task = ""
         if name and (not task or re.search(OPEN_WORDS, text.lower())):  # plain 'open X [and do Y]' — fast path
             log(f"Проект: {name}, задача: «{task}»")
-            speak_bg(CFG["phrases"]["task" if task else "opening"].format(name=spoken_name(name)))
             open_project(name, projs[name], task or None)
+            speak(CFG["phrases"]["task" if task else "opening"].format(name=spoken_name(name)))
             if task:
                 return
             audio = record_phrase(max_wait=8.0, max_len=25.0, silence=0.9)  # 'Открываю X.' -> the task
@@ -710,7 +815,7 @@ def handle_command(text=None, greet=True):
             if follow and not re.search(JUST_OPEN, follow.lower()) and len(re.findall(r"\w+", follow)) >= 2:
                 wait_ready(name)
                 send_task(name, follow)
-                speak_bg(CFG["phrases"]["task"])
+                speak(CFG["phrases"]["task"])
             return
         if len(re.findall(r"\w+", text)) < 2 and attempt == 0:
             speak(CFG["phrases"]["repeat"])
@@ -718,8 +823,12 @@ def handle_command(text=None, greet=True):
             continue
         subprocess.Popen(["afplay", "/System/Library/Sounds/Tink.aiff"])  # 'thinking…'
         hud("thinking", f"«{text}»")
-        answer = think(text)
-        log(f"Джарвис: «{answer}»")
+        answer, wants_sleep = think(text)
+        log(f"Джарвис: «{answer}»" + (" [уснул]" if wants_sleep else ""))
+        if wants_sleep:
+            go_to_sleep()
+            speak(answer)
+            return
         if speak(answer):
             text = None  # interrupted by a clap -> listen right away
             continue
@@ -832,7 +941,7 @@ def handle_dialog(session, menu):
     question, options, selected = menu
     if session.startswith("jt"):  # test sessions
         return
-    speak_bg("Сэр, у Claude вопрос.")
+    speak("Сэр, у Claude вопрос.")
     if speak(retell(question, options)):
         speak("Слушаю.")
     for attempt in range(2):
@@ -907,7 +1016,10 @@ def listen_claps():
     def cb(indata, frames, t, status):
         q.put(indata[:, 0].copy())
 
+    for f in (LISTENING, SPEAKING, CANCEL, TRIGGER):  # leftovers from a crash
+        f.unlink(missing_ok=True)
     start_hud()
+    threading.Thread(target=brain.ready, daemon=True).start()  # warm up the brain
     threading.Thread(target=watch_dialogs, daemon=True).start()
     while True:
         det = ClapDetector()
@@ -1003,6 +1115,9 @@ def show_levels():
 def main():
     args = sys.argv[1:]
     if args[:1] == ["--say"]:
+        end = time.time() + 90
+        while LISTENING.exists() and time.time() < end:  # don't talk over the user
+            time.sleep(0.3)
         try:
             speak(" ".join(args[1:]))
         except Cancelled:
