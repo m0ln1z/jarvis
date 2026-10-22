@@ -28,6 +28,20 @@ Claude Code запускается в режиме `--dangerously-skip-permissio
 
 ## Установка
 
+**Проще всего — готовый релиз:**
+1. Скачайте `jarvis-*-macos.zip` со страницы [последнего релиза](https://github.com/m0ln1z/jarvis/releases/latest) и распакуйте.
+2. Дважды кликните **`Install Jarvis.command`**. Если macOS не даёт открыть — правый клик → «Открыть» → «Открыть».
+
+Джарвис скопируется в `~/jarvis`, поставит всё нужное и запустится в фоне.
+
+**Одной командой в терминале:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/m0ln1z/jarvis/main/get.sh | zsh
+```
+
+**Вручную:**
+
 ```bash
 git clone https://github.com/m0ln1z/jarvis.git ~/jarvis
 cd ~/jarvis
