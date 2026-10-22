@@ -192,11 +192,11 @@ final class HUD {
 
 // ---------- menu bar icon ----------
 
-final class MenuBar: NSObject {
+final class MenuBar: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let menu = NSMenu()
     let status = NSMenuItem(title: "Спит", action: nil, keyEquivalent: "")
-    let pause = NSMenuItem(title: "Пауза — не реагировать на хлопки", action: #selector(togglePause), keyEquivalent: "p")
+    let pause = NSMenuItem(title: "Пауза — выключить микрофон", action: #selector(togglePause), keyEquivalent: "p")
     let dir: String
     let label = "gui/\(getuid())/com.jarvis.voice"
 
@@ -218,6 +218,7 @@ final class MenuBar: NSObject {
         add("Перезапустить", #selector(restart), "r")
         add("Выключить до следующего входа", #selector(quit), "q")
         item.menu = menu
+        menu.delegate = self
         pause.state = FileManager.default.fileExists(atPath: dir + "/.paused") ? .on : .off
         set("hide")
     }
@@ -257,6 +258,10 @@ final class MenuBar: NSObject {
         default: item.button?.image = icon(nil); status.title = paused ? "На паузе" : "Спит — двойной хлопок и пароль"
         }
         item.button?.alphaValue = paused && state == "hide" ? 0.45 : 1
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {  // the pause file may have been changed elsewhere
+        pause.state = FileManager.default.fileExists(atPath: dir + "/.paused") ? .on : .off
     }
 
     @objc func listen() { FileManager.default.createFile(atPath: dir + "/.trigger", contents: nil) }

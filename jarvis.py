@@ -892,12 +892,24 @@ def listen_claps():
     threading.Thread(target=watch_dialogs, daemon=True).start()
     while True:
         det = ClapDetector()
-        dialog, triggered = None, False
-        log("Жду хлопок…")
+        dialog, triggered, clapped = None, False, False
+        if PAUSED.exists():  # paused: microphone closed (the orange mic icon goes away) until resumed or 'Слушать'
+            log("Пауза: микрофон выключен")
+            while PAUSED.exists() and not TRIGGER.exists():
+                if CANCEL.exists():
+                    CANCEL.unlink(missing_ok=True)
+                    stop_speaking()
+                    hud("hide")
+                time.sleep(0.3)
+            if TRIGGER.exists():
+                TRIGGER.unlink(missing_ok=True)
+                triggered = True
+        if not triggered:
+            log("Жду хлопок…")
         with sd.InputStream(samplerate=RATE, channels=1, blocksize=BLOCK, dtype="float32", callback=cb):
             start = time.time()
             n = 0
-            while True:
+            while not triggered:
                 b = q.get()
                 n += 1
                 if n < 50:  # first second: learn background noise only
@@ -914,15 +926,18 @@ def listen_claps():
                     triggered = True
                     break
                 if PAUSED.exists():
-                    continue
+                    break  # close the microphone
                 det.boost = 2.0 if SPEAKING.exists() else 1.0  # our own voice from the speakers
                 if det.feed(b, start + n * BLOCK / RATE):
+                    clapped = True
                     break
                 if not dialogs.empty():
                     dialog = dialogs.get()
                     break
         while not q.empty():
             q.get()
+        if not (dialog or triggered or clapped):
+            continue  # left the loop only to pause
         if dialog:
             log("Вопрос от Claude:", dialog)
             stop_speaking()
