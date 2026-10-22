@@ -311,6 +311,17 @@ def new_window(cmd):
     return osa(f'tell application "Terminal"\n activate\n do script "{esc}"\n return id of front window\nend tell')
 
 
+def wait_ready(project, timeout=25):
+    """Waits until Claude in the project shows its input prompt (it needs a few seconds to start)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        screen = tmux("capture-pane", "-p", "-t", session_name(project)).stdout
+        if "bypass permissions" in screen or re.search(r"^\s*❯\s*$", screen, re.M):
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def interrupt(project):
     tmux("send-keys", "-t", session_name(project), "Escape")
 
@@ -486,11 +497,19 @@ def record_phrase(max_wait=5.0, max_len=7.0, silence=0.9):
 def transcribe(audio, projs):
     hint = ("Просыпайся, папочка вернулся. Проекты: "
             + ", ".join(list(projs) + [a for v in CFG["aliases"].values() for a in v])) if projs else None
-    segs, _ = whisper().transcribe(audio, language="ru", initial_prompt=hint, beam_size=1, vad_filter=False)
-    return " ".join(s.text for s in segs).strip()
+    segs, _ = whisper().transcribe(audio, language="ru", initial_prompt=hint, beam_size=1, vad_filter=True)
+    text = " ".join(s.text for s in segs).strip()
+    if re.search(HALLUCINATIONS, text, re.I):
+        log(f"Отброшено (глюк распознавания): «{text}»")
+        return ""
+    return text
 
 
-OPEN_WORDS = r"открой|откро|открыл|открыть|запусти|перейди|переключи|проект|нужно|надо|хочу|слушай|давай|братан|джарвис"
+# what Whisper "hears" in silence or noise
+HALLUCINATIONS = r"субтитр|редактор|корректор|продолжение следует|спасибо за просмотр|подписывайтесь|dimatorzok|amara\.org"
+
+
+OPEN_WORDS = r"открой|откро|открыл|открыть|\bсрой|\bкрой|\bотрой|запусти|перейди|переключи|проект|нужно|надо|хочу|слушай|давай|братан|джарвис"
 SHUT_UP = r"^\W*(замолчи|тихо|молчи|помолчи|хватит говорить|заткнись)\W*"
 STOP = r"^\W*(стоп|отмени|отмена|останови|остановись|прекрати|хватит)\W*$"
 JUST_OPEN = r"ничего|не надо|просто откр|пока нет|^\W*(нет|просто)\W*$"
@@ -513,6 +532,7 @@ def split_command(text, projs):
     after = " ".join(words[span[1]:])
     after = re.sub(r"^[\s,.:;!-]*((и|там|а|чтобы|потом)\s+)*", "", after).strip(" .,!")
     before = " ".join(words[:span[0]]).strip(" .,!")
+    after = re.sub(r"\b(пожалуйста|плиз|please|спасибо|сэр|джарвис)\b", "", after, flags=re.I).strip(" ,.!?")
     if norm(after) in GENERIC:
         after = ""
     if not after and len(before.split()) >= 3 and not re.search(OPEN_WORDS, before.lower()):
@@ -600,6 +620,15 @@ def handle_command(text=None, greet=True):
             log(f"Проект: {name}, задача: «{task}»")
             speak_bg(CFG["phrases"]["task" if task else "opening"].format(name=spoken_name(name)))
             open_project(name, projs[name], task or None)
+            if task:
+                return
+            audio = record_phrase(max_wait=8.0, max_len=25.0, silence=0.9)  # 'Открываю X.' -> the task
+            follow = transcribe(audio, projs) if audio is not None else ""
+            log(f"Задача для {name}: «{follow}»")
+            if follow and not re.search(JUST_OPEN, follow.lower()) and len(re.findall(r"\w+", follow)) >= 2:
+                wait_ready(name)
+                send_task(name, follow)
+                speak_bg(CFG["phrases"]["task"])
             return
         if len(re.findall(r"\w+", text)) < 2 and attempt == 0:
             speak(CFG["phrases"]["repeat"])
@@ -611,8 +640,8 @@ def handle_command(text=None, greet=True):
         if speak(answer):
             text = None  # interrupted by a clap -> listen right away
             continue
-        # follow-up without a clap
-        audio = record_phrase(max_wait=5.0, max_len=25.0, silence=0.8)
+        # follow-up without a clap; a question from Jarvis gets more time to answer
+        audio = record_phrase(max_wait=10.0 if answer.rstrip().endswith("?") else 6.0, max_len=25.0, silence=0.9)
         if audio is None:
             return
         text = transcribe(audio, projs)
