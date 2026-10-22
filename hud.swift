@@ -1,5 +1,7 @@
-// Jarvis HUD: an arc-reactor style circle on top of the screen showing what Jarvis is doing.
+// Jarvis HUD: an arc-reactor style circle on top of the screen showing what Jarvis is doing,
+// plus a menu bar icon with controls.
 // Reads commands from a FIFO, one per line: "<state>\t<text>", state = listening | thinking | speaking | hide.
+// Talks back to Jarvis through files next to the FIFO: .trigger (listen now), .paused (ignore claps).
 // Build: swiftc -O hud.swift -o JarvisHUD
 import AppKit
 import QuartzCore
@@ -138,11 +140,106 @@ final class HUD {
     }
 }
 
+// ---------- menu bar icon ----------
+
+final class MenuBar: NSObject {
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    let menu = NSMenu()
+    let status = NSMenuItem(title: "Спит", action: nil, keyEquivalent: "")
+    let pause = NSMenuItem(title: "Пауза — не реагировать на хлопки", action: #selector(togglePause), keyEquivalent: "p")
+    let dir: String
+    let label = "gui/\(getuid())/com.jarvis.voice"
+
+    init(dir: String) {
+        self.dir = dir
+        super.init()
+        status.isEnabled = false
+        menu.addItem(withTitle: "Джарвис", action: nil, keyEquivalent: "").isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+        add("Слушать", #selector(listen), "l")
+        menu.addItem(pause)
+        pause.target = self
+        menu.addItem(.separator())
+        add("Настройки…", #selector(settings), ",")
+        add("Лог", #selector(showLog), "")
+        add("Перезапустить", #selector(restart), "r")
+        add("Выключить до следующего входа", #selector(quit), "q")
+        item.menu = menu
+        pause.state = FileManager.default.fileExists(atPath: dir + "/.paused") ? .on : .off
+        set("hide")
+    }
+
+    func add(_ title: String, _ action: Selector, _ key: String) {
+        let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        i.target = self
+        menu.addItem(i)
+    }
+
+    /// Small reactor: outline when asleep, colored when busy.
+    func icon(_ color: NSColor?) -> NSImage {
+        let img = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { r in
+            let c = color ?? .black
+            c.setStroke()
+            let outer = NSBezierPath(ovalIn: r.insetBy(dx: 1.5, dy: 1.5))
+            outer.lineWidth = 1.6
+            outer.setLineDash([2.6, 1.6], count: 2, phase: 0)
+            outer.stroke()
+            let inner = NSBezierPath(ovalIn: r.insetBy(dx: 5, dy: 5))
+            inner.lineWidth = 1.4
+            inner.stroke()
+            c.withAlphaComponent(color == nil ? 0.9 : 1).setFill()
+            NSBezierPath(ovalIn: r.insetBy(dx: 7.3, dy: 7.3)).fill()
+            return true
+        }
+        img.isTemplate = color == nil  // asleep: follows the menu bar's light/dark look
+        return img
+    }
+
+    func set(_ state: String) {
+        let paused = pause.state == .on
+        switch state {
+        case "listening": item.button?.image = icon(NSColor(red: 0.30, green: 0.82, blue: 1.0, alpha: 1)); status.title = "Слушает…"
+        case "thinking": item.button?.image = icon(NSColor(red: 1.0, green: 0.72, blue: 0.25, alpha: 1)); status.title = "Думает…"
+        case "speaking": item.button?.image = icon(NSColor(red: 0.62, green: 0.95, blue: 1.0, alpha: 1)); status.title = "Говорит…"
+        default: item.button?.image = icon(nil); status.title = paused ? "На паузе" : "Спит — двойной хлопок и пароль"
+        }
+        item.button?.alphaValue = paused && state == "hide" ? 0.45 : 1
+    }
+
+    @objc func listen() { FileManager.default.createFile(atPath: dir + "/.trigger", contents: nil) }
+
+    @objc func togglePause() {
+        let path = dir + "/.paused"
+        if pause.state == .on {
+            try? FileManager.default.removeItem(atPath: path)
+            pause.state = .off
+        } else {
+            FileManager.default.createFile(atPath: path, contents: nil)
+            pause.state = .on
+        }
+        set("hide")
+    }
+
+    @objc func settings() { run("/usr/bin/open", ["-t", dir + "/config.json"]) }
+    @objc func showLog() { run("/usr/bin/open", ["-a", "Console", dir + "/jarvis.log"]) }
+    @objc func restart() { run("/bin/launchctl", ["kickstart", "-k", label]) }
+    @objc func quit() { run("/bin/launchctl", ["bootout", label]) }
+
+    func run(_ path: String, _ args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        try? p.run()
+    }
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)  // no Dock icon, never takes focus
 let hud = HUD()
 
 let fifo = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : NSHomeDirectory() + "/jarvis/.hud"
+let bar = MenuBar(dir: (fifo as NSString).deletingLastPathComponent)
 Thread {
     let fd = open(fifo, O_RDWR)  // read+write: a FIFO opened like this never hits EOF between writers
     guard fd >= 0, let f = fdopen(fd, "r") else { exit(1) }
@@ -152,7 +249,7 @@ Thread {
         let parts = String(cString: line!).trimmingCharacters(in: .newlines)
             .split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
         let state = parts.first ?? "hide", text = parts.count > 1 ? parts[1] : ""
-        DispatchQueue.main.async { hud.apply(state, text) }
+        DispatchQueue.main.async { hud.apply(state, text); bar.set(state) }
     }
 }.start()
 

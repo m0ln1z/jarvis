@@ -109,6 +109,9 @@ def synth(text):
 
 SPEAKING = HERE / ".speaking"
 HUD_FIFO = HERE / ".hud"
+TRIGGER = HERE / ".trigger"  # menu bar 'Слушать'
+PAUSED = HERE / ".paused"    # menu bar 'Пауза'
+
 
 
 def hud(state, text=""):
@@ -594,10 +597,10 @@ def strip_wake(text):
     return True, " ".join(words[last + 1:]).strip(" ,.!")
 
 
-def on_clap():
-    """Asleep: silently waits for the wake phrase. Awake: takes a command right away."""
+def on_clap(force=False):
+    """Asleep: silently waits for the wake phrase. Awake (or 'Слушать' in the menu): takes a command right away."""
     global awake_until
-    if time.time() < awake_until:
+    if force or time.time() < awake_until:
         awake_until = time.time() + CFG.get("awake_minutes", 15) * 60
         return handle_command()
     audio = record_phrase(max_wait=4.0, max_len=20.0, silence=0.8)
@@ -855,7 +858,7 @@ def listen_claps():
     threading.Thread(target=watch_dialogs, daemon=True).start()
     while True:
         det = ClapDetector()
-        dialog = None
+        dialog, triggered = None, False
         log("Жду хлопок…")
         with sd.InputStream(samplerate=RATE, channels=1, blocksize=BLOCK, dtype="float32", callback=cb):
             start = time.time()
@@ -867,6 +870,12 @@ def listen_claps():
                     det.noise = 0.9 * det.noise + 0.1 * float(np.sqrt(np.mean(b ** 2)))
                     if n == 49 and det.noise == 0:
                         log("ВНИМАНИЕ: микрофон молчит — нет доступа к микрофону?")
+                    continue
+                if n % 10 == 0 and TRIGGER.exists():  # 'Слушать' in the menu bar = clap + password
+                    TRIGGER.unlink(missing_ok=True)
+                    triggered = True
+                    break
+                if PAUSED.exists():
                     continue
                 det.boost = 2.0 if SPEAKING.exists() else 1.0  # our own voice from the speakers
                 if det.feed(b, start + n * BLOCK / RATE):
@@ -886,10 +895,10 @@ def listen_claps():
             finally:
                 hud("hide")
             continue
-        log("Хлопок!")
+        log("Слушаю по кнопке в меню" if triggered else "Хлопок!")
         stop_speaking()
         try:
-            on_clap()
+            on_clap(force=triggered)
         except Exception as e:
             log("Ошибка:", e)
         finally:

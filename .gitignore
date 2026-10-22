@@ -15,3 +15,5 @@ claude-settings.json
 state.json
 .speaking
 *.log
+.trigger
+.paused
