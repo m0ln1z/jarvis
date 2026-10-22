@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+cache/
+brain/
+samples/
+.DS_Store
+
+# personal: keys, own settings, logs, runtime state
+.fish_key
+.env
+config.json
+claude-settings.json
+state.json
+.speaking
+*.log

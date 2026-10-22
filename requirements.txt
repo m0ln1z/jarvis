@@ -1,0 +1,4 @@
+numpy
+sounddevice
+edge-tts
+faster-whisper

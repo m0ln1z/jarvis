@@ -1,0 +1,49 @@
+{
+  "voice": "ru-RU-DmitryNeural",
+  "voice_rate": "-6%",
+  "voice_fx": "acompressor=threshold=0.1:ratio=3,chorus=0.7:0.9:25|40:0.25|0.18:0.3|0.25:1.2|1.6,aecho=0.8:0.6:20|34:0.22|0.12,equalizer=f=180:t=q:w=1:g=2,equalizer=f=3500:t=q:w=1:g=2.5,highpass=f=70,volume=1.6",
+  "phrases": {
+    "listening": "Да, сэр?",
+    "repeat": "Не расслышал, сэр. Повторите.",
+    "not_found": "Такого проекта не нашёл, сэр.",
+    "opening": "Открываю {name}.",
+    "task": "Принято, сэр.",
+    "stopped": "Остановил, сэр.",
+    "ready": "Джарвис на связи. Сплю, пока не позовёте.",
+    "wake": "С возвращением, сэр. Какой проект открываем?"
+  },
+  "projects_roots": [
+    "~/Desktop"
+  ],
+  "exclude": [
+    "Новая папка"
+  ],
+  "aliases": {
+    "my-backend": [
+      "мой бэкенд"
+    ],
+    "landing-site": [
+      "лендинг",
+      "сайт"
+    ]
+  },
+  "launch_command": "claude --dangerously-skip-permissions --settings {settings}",
+  "whisper_model": "small",
+  "clap": {
+    "double": true,
+    "min_level": 1.2,
+    "noise_ratio": 8.0,
+    "max_clap_sec": 0.2,
+    "gap_min_sec": 0.12,
+    "gap_max_sec": 0.9,
+    "min_hf_ratio": 0
+  },
+  "voice_pitch": "-10Hz",
+  "awake_minutes": 15,
+  "tts": "edge",
+  "fish": {
+    "model": "s2.1-pro-free",
+    "reference_id": "a03438d6fdf34d61b72f0ec0d443a0af",
+    "fx": "acompressor=threshold=0.12:ratio=2.5,aecho=0.8:0.55:20|34:0.15|0.08,highpass=f=60,volume=1.3"
+  }
+}
