@@ -111,6 +111,16 @@ SPEAKING = HERE / ".speaking"
 HUD_FIFO = HERE / ".hud"
 TRIGGER = HERE / ".trigger"  # menu bar 'Слушать'
 PAUSED = HERE / ".paused"    # menu bar 'Пауза'
+CANCEL = HERE / ".cancel"    # click on the circle / menu 'Отменить'
+
+
+class Cancelled(BaseException):
+    """The user pressed stop. BaseException so that generic 'except Exception' blocks don't swallow it."""
+
+
+def check_cancel():
+    if CANCEL.exists():
+        raise Cancelled
 
 
 
@@ -158,6 +168,9 @@ def wait_or_clap(proc):
             while proc.poll() is None:
                 b, _ = st.read(BLOCK)
                 t += BLOCK / RATE
+                if CANCEL.exists():
+                    proc.kill()
+                    raise Cancelled
                 if t > 0.3 and det.feed(b[:, 0], t):
                     proc.kill()
                     log("Перебили хлопком")
@@ -461,9 +474,16 @@ def think(text):
         cmd += ["--resume", st["brain_session"]]
     (HERE / "brain").mkdir(exist_ok=True)
     try:
-        r = subprocess.run(cmd + [text], capture_output=True, text=True, timeout=120,
-                           cwd=str(HERE / "brain"), stdin=subprocess.DEVNULL)
-        d = json.loads(r.stdout)
+        p = subprocess.Popen(cmd + [text], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                             cwd=str(HERE / "brain"), stdin=subprocess.DEVNULL)
+        end = time.time() + 120
+        while p.poll() is None:
+            if CANCEL.exists() or time.time() > end:
+                p.kill()
+                check_cancel()
+                raise TimeoutError("мозг думал больше 2 минут")
+            time.sleep(0.2)
+        d = json.loads(p.stdout.read())
     except Exception as e:
         log("Мозг не ответил:", e)
         return "Простите, сэр, что-то пошло не так."
@@ -497,6 +517,7 @@ def record_phrase(max_wait=5.0, max_len=7.0, silence=0.9):
         while True:
             b, _ = st.read(BLOCK)
             b = b[:, 0]
+            check_cancel()
             rms = float(np.sqrt(np.mean(b ** 2)))
             now = time.time() - t0
             if len(noise) < 15:  # first 300 ms -> background level
@@ -540,7 +561,10 @@ HALLUCINATIONS = r"субтитр|редактор|корректор|продо
 
 OPEN_WORDS = r"открой|откро|открыл|открыть|\bсрой|\bкрой|\bотрой|запусти|перейди|переключи|проект|нужно|надо|хочу|слушай|давай|братан|джарвис"
 SHUT_UP = r"^\W*(замолчи|тихо|молчи|помолчи|хватит говорить|заткнись)\W*"
-STOP = r"^\W*(стоп|отмени|отмена|останови|остановись|прекрати|хватит)\W*$"
+STOP = r"^\W*(стоп|отмени|отмена|останови|остановись|прекрати)\W*$"
+SLEEP = (r"^\W*(?:(?:ну|всё|ничего|джарвис|ладно)\W+)*(выключись|выключайся|отключись|отключайся|выключи(?:ть)?|"
+         r"отключи(?:ть)?|спи|спать|иди спать|отбой|свободен|пока|ничего|всё|хватит|достаточно|спасибо)"
+         r"(?:\W+(?:сэр|джарвис|спасибо))*\W*$")  # the whole phrase, so 'выключи музыку' still goes to the brain
 JUST_OPEN = r"ничего|не надо|просто откр|пока нет|^\W*(нет|просто)\W*$"
 
 
@@ -597,6 +621,12 @@ def strip_wake(text):
     return True, " ".join(words[last + 1:]).strip(" ,.!")
 
 
+def go_to_sleep():
+    global awake_until
+    awake_until = 0.0
+    log("Ухожу спать")
+
+
 def on_clap(force=False):
     """Asleep: silently waits for the wake phrase. Awake (or 'Слушать' in the menu): takes a command right away."""
     global awake_until
@@ -637,6 +667,10 @@ def handle_command(text=None, greet=True):
             t = text.lower()
             if not text:
                 return
+        if re.match(SLEEP, t):
+            go_to_sleep()
+            speak_bg(CFG["phrases"].get("sleep", "Как скажете, сэр."))
+            return
         if re.match(STOP, t):
             if current:
                 interrupt(current)
@@ -871,6 +905,10 @@ def listen_claps():
                     if n == 49 and det.noise == 0:
                         log("ВНИМАНИЕ: микрофон молчит — нет доступа к микрофону?")
                     continue
+                if n % 10 == 0 and CANCEL.exists():  # stop pressed while idle: silence any read-out
+                    CANCEL.unlink(missing_ok=True)
+                    stop_speaking()
+                    hud("hide")
                 if n % 10 == 0 and TRIGGER.exists():  # 'Слушать' in the menu bar = clap + password
                     TRIGGER.unlink(missing_ok=True)
                     triggered = True
@@ -892,6 +930,11 @@ def listen_claps():
                 handle_dialog(*dialog)
             except Exception as e:
                 log("Ошибка:", e)
+            except Cancelled:
+                log("Остановлено кнопкой")
+                CANCEL.unlink(missing_ok=True)
+                stop_speaking()
+                go_to_sleep()
             finally:
                 hud("hide")
             continue
@@ -901,6 +944,11 @@ def listen_claps():
             on_clap(force=triggered)
         except Exception as e:
             log("Ошибка:", e)
+        except Cancelled:
+            log("Остановлено кнопкой")
+            CANCEL.unlink(missing_ok=True)
+            stop_speaking()
+            go_to_sleep()
         finally:
             hud("hide")
 
@@ -918,7 +966,10 @@ def show_levels():
 def main():
     args = sys.argv[1:]
     if args[:1] == ["--say"]:
-        speak(" ".join(args[1:]))
+        try:
+            speak(" ".join(args[1:]))
+        except Cancelled:
+            pass
         hud("hide")
         return
     if args[:1] == ["ctl"]:

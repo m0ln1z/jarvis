@@ -1,38 +1,65 @@
 // Jarvis HUD: an arc-reactor style circle on top of the screen showing what Jarvis is doing,
 // plus a menu bar icon with controls.
 // Reads commands from a FIFO, one per line: "<state>\t<text>", state = listening | thinking | speaking | hide.
-// Talks back to Jarvis through files next to the FIFO: .trigger (listen now), .paused (ignore claps).
+// Talks back to Jarvis through files next to the FIFO: .trigger (listen now), .paused (ignore claps),
+// .cancel (stop whatever Jarvis is doing — a click on the circle).
 // Build: swiftc -O hud.swift -o JarvisHUD
 import AppKit
 import QuartzCore
 
 let W: CGFloat = 560, H: CGFloat = 190, D: CGFloat = 110  // window size, circle diameter
 
+/// The circle itself: clickable, shows ✕ on hover.
+final class ReactorView: NSView {
+    var onClick: () -> Void = {}
+    let cross = CATextLayer()
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onClick() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func updateTrackingAreas() {
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { cross.opacity = 1 }
+    override func mouseExited(with event: NSEvent) { cross.opacity = 0 }
+}
+
 final class HUD {
-    let panel: NSPanel
+    let panel: NSPanel      // the circle: takes clicks
+    let textPanel: NSPanel  // caption under it: clicks pass through
     let reactor = CALayer()
     let glow = CAShapeLayer(), ring = CAShapeLayer(), arc = CAShapeLayer(), arc2 = CAShapeLayer()
     let core = CAShapeLayer(), inner = CAShapeLayer()
     let label = NSTextField(labelWithString: "")
     var shown = false
+    var onCancel: () -> Void = {}
+
+    static func makePanel(_ rect: NSRect) -> NSPanel {
+        let p = NSPanel(contentRect: rect, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.level = .statusBar
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = false
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        p.alphaValue = 0
+        return p
+    }
 
     init() {
         let vf = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        panel = NSPanel(contentRect: NSRect(x: vf.midX - W / 2, y: vf.maxY - H - 8, width: W, height: H),
-                        styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.level = .statusBar
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.ignoresMouseEvents = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        panel.alphaValue = 0
+        let side = D + 16
+        panel = HUD.makePanel(NSRect(x: vf.midX - side / 2, y: vf.maxY - side - 2, width: side, height: side))
+        textPanel = HUD.makePanel(NSRect(x: vf.midX - W / 2, y: vf.maxY - H - 8, width: W, height: H - side))
+        textPanel.ignoresMouseEvents = true
 
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H))
+        let view = ReactorView(frame: NSRect(x: 0, y: 0, width: side, height: side))
         view.wantsLayer = true
+        view.toolTip = "Нажмите, чтобы остановить Джарвиса"
+        view.onClick = { [unowned self] in self.onCancel() }
         panel.contentView = view
 
-        reactor.frame = CGRect(x: (W - D) / 2, y: H - D - 6, width: D, height: D)
+        reactor.frame = CGRect(x: 8, y: 8, width: D, height: D)
         view.layer!.addSublayer(reactor)
         func circle(_ layer: CAShapeLayer, inset: CGFloat) {
             layer.frame = reactor.bounds
@@ -63,7 +90,20 @@ final class HUD {
         inner.lineWidth = 2
         circle(core, inset: 38)
 
-        label.frame = NSRect(x: 10, y: 4, width: W - 20, height: H - D - 18)
+        // ✕ over the core on hover
+        let cross = view.cross
+        cross.string = "✕"
+        cross.fontSize = 30
+        cross.alignmentMode = .center
+        cross.foregroundColor = NSColor.white.cgColor
+        cross.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
+        cross.frame = CGRect(x: 8, y: 8 + D / 2 - 19, width: D, height: 38)
+        cross.opacity = 0
+        view.layer!.addSublayer(cross)
+
+        let textView = NSView(frame: NSRect(x: 0, y: 0, width: W, height: H - side))
+        textPanel.contentView = textView
+        label.frame = NSRect(x: 10, y: 4, width: W - 20, height: H - side - 10)
         label.alignment = .center
         label.font = .systemFont(ofSize: 15, weight: .medium)
         label.textColor = .white
@@ -74,7 +114,7 @@ final class HUD {
         shadow.shadowColor = .black
         shadow.shadowBlurRadius = 6
         label.shadow = shadow
-        view.addSubview(label)
+        textView.addSubview(label)
     }
 
     func spin(_ layer: CALayer, _ seconds: Double, reverse: Bool = false) {
@@ -99,8 +139,13 @@ final class HUD {
 
     func apply(_ state: String, _ text: String) {
         if state == "hide" {
-            NSAnimationContext.runAnimationGroup({ $0.duration = 0.5; panel.animator().alphaValue = 0 },
-                                                 completionHandler: { if !self.shown { self.panel.orderOut(nil) } })
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.5
+                panel.animator().alphaValue = 0
+                textPanel.animator().alphaValue = 0
+            }, completionHandler: {
+                if !self.shown { self.panel.orderOut(nil); self.textPanel.orderOut(nil) }
+            })
             shown = false
             return
         }
@@ -135,7 +180,12 @@ final class HUD {
         if !shown {
             shown = true
             panel.orderFrontRegardless()
-            NSAnimationContext.runAnimationGroup { $0.duration = 0.3; panel.animator().alphaValue = 1 }
+            textPanel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.3
+                panel.animator().alphaValue = 1
+                textPanel.animator().alphaValue = 1
+            }
         }
     }
 }
@@ -158,6 +208,8 @@ final class MenuBar: NSObject {
         menu.addItem(status)
         menu.addItem(.separator())
         add("Слушать", #selector(listen), "l")
+        add("Отменить — замолчать и уснуть", #selector(cancel), ".")
+        add("Остановить Claude в текущем проекте", #selector(stopClaude), "")
         menu.addItem(pause)
         pause.target = self
         menu.addItem(.separator())
@@ -208,6 +260,8 @@ final class MenuBar: NSObject {
     }
 
     @objc func listen() { FileManager.default.createFile(atPath: dir + "/.trigger", contents: nil) }
+    @objc func cancel() { FileManager.default.createFile(atPath: dir + "/.cancel", contents: nil); hud.apply("hide", "") }
+    @objc func stopClaude() { run(dir + "/jarvisctl", ["stop", "current"]) }
 
     @objc func togglePause() {
         let path = dir + "/.paused"
@@ -240,6 +294,7 @@ let hud = HUD()
 
 let fifo = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : NSHomeDirectory() + "/jarvis/.hud"
 let bar = MenuBar(dir: (fifo as NSString).deletingLastPathComponent)
+hud.onCancel = { bar.cancel() }
 Thread {
     let fd = open(fifo, O_RDWR)  // read+write: a FIFO opened like this never hits EOF between writers
     guard fd >= 0, let f = fdopen(fd, "r") else { exit(1) }
