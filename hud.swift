@@ -5,6 +5,7 @@
 // .cancel (stop whatever Jarvis is doing — a click on the circle).
 // Build: swiftc -O hud.swift -o JarvisHUD
 import AppKit
+import Carbon
 import QuartzCore
 
 let W: CGFloat = 560, H: CGFloat = 190, D: CGFloat = 110  // window size, circle diameter
@@ -196,7 +197,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     let menu = NSMenu()
     let status = NSMenuItem(title: "Спит", action: nil, keyEquivalent: "")
-    let pause = NSMenuItem(title: "Пауза — выключить микрофон", action: #selector(togglePause), keyEquivalent: "p")
+    let pause = NSMenuItem(title: "Пауза — выключить микрофон", action: #selector(togglePause), keyEquivalent: "")
     let dir: String
     let label = "gui/\(getuid())/com.jarvis.voice"
 
@@ -207,16 +208,16 @@ final class MenuBar: NSObject, NSMenuDelegate {
         menu.addItem(withTitle: "Джарвис", action: nil, keyEquivalent: "").isEnabled = false
         menu.addItem(status)
         menu.addItem(.separator())
-        add("Слушать", #selector(listen), "l")
-        add("Отменить — замолчать и уснуть", #selector(cancel), ".")
+        add("Слушать  (\(hotkeyName) — из любого приложения)", #selector(listen), "")
+        add("Отменить — замолчать и уснуть  (\(hotkeyName) ещё раз)", #selector(cancel), "")
         add("Остановить Claude в текущем проекте", #selector(stopClaude), "")
         menu.addItem(pause)
         pause.target = self
         menu.addItem(.separator())
         add("Настройки…", #selector(settings), ",")
         add("Лог", #selector(showLog), "")
-        add("Перезапустить", #selector(restart), "r")
-        add("Выключить до следующего входа", #selector(quit), "q")
+        add("Перезапустить", #selector(restart), "")
+        add("Выключить до следующего входа", #selector(quit), "")
         item.menu = menu
         menu.delegate = self
         pause.state = FileManager.default.fileExists(atPath: dir + "/.paused") ? .on : .off
@@ -293,13 +294,66 @@ final class MenuBar: NSObject, NSMenuDelegate {
     }
 }
 
+// ---------- global hotkey (default ⌥J): listen, or stop if Jarvis is busy ----------
+
+func readHotkey(_ dir: String) -> String {
+    guard let data = FileManager.default.contents(atPath: dir + "/config.json"),
+          let cfg = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let hk = cfg["hotkey"] as? String else { return "alt+j" }
+    return hk.lowercased()
+}
+
+let keyCodes: [String: Int] = [
+    "a": kVK_ANSI_A, "b": kVK_ANSI_B, "c": kVK_ANSI_C, "d": kVK_ANSI_D, "e": kVK_ANSI_E, "f": kVK_ANSI_F,
+    "g": kVK_ANSI_G, "h": kVK_ANSI_H, "i": kVK_ANSI_I, "j": kVK_ANSI_J, "k": kVK_ANSI_K, "l": kVK_ANSI_L,
+    "m": kVK_ANSI_M, "n": kVK_ANSI_N, "o": kVK_ANSI_O, "p": kVK_ANSI_P, "q": kVK_ANSI_Q, "r": kVK_ANSI_R,
+    "s": kVK_ANSI_S, "t": kVK_ANSI_T, "u": kVK_ANSI_U, "v": kVK_ANSI_V, "w": kVK_ANSI_W, "x": kVK_ANSI_X,
+    "y": kVK_ANSI_Y, "z": kVK_ANSI_Z, "space": kVK_Space, "return": kVK_Return, "escape": kVK_Escape,
+    "f1": kVK_F1, "f2": kVK_F2, "f3": kVK_F3, "f4": kVK_F4, "f5": kVK_F5, "f6": kVK_F6,
+    "f7": kVK_F7, "f8": kVK_F8, "f9": kVK_F9, "f10": kVK_F10, "f11": kVK_F11, "f12": kVK_F12,
+]
+
+/// "alt+j" -> (key code, Carbon modifiers, "⌥J")
+func parseHotkey(_ s: String) -> (UInt32, UInt32, String)? {
+    var mods: UInt32 = 0, name = "", code: Int? = nil
+    for part in s.split(separator: "+").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+        switch part {
+        case "cmd", "command": mods |= UInt32(cmdKey); name += "⌘"
+        case "alt", "option", "opt": mods |= UInt32(optionKey); name += "⌥"
+        case "ctrl", "control": mods |= UInt32(controlKey); name += "⌃"
+        case "shift": mods |= UInt32(shiftKey); name += "⇧"
+        default: code = keyCodes[part]; name += part == "space" ? "Space" : part.uppercased()
+        }
+    }
+    guard let c = code else { return nil }
+    return (UInt32(c), mods, name)
+}
+
+var hotkeyName = "⌥J"
+var hotkeyRef: EventHotKeyRef?
+var onHotkey: () -> Void = {}
+
+func registerHotkey(_ spec: String) {
+    guard let (code, mods, name) = parseHotkey(spec) else { return }
+    hotkeyName = name
+    var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+    InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in onHotkey(); return noErr }, 1, &type, nil, nil)
+    let id = EventHotKeyID(signature: OSType(0x4A52_5653), id: 1)  // 'JRVS'
+    let status = RegisterEventHotKey(code, mods, id, GetApplicationEventTarget(), 0, &hotkeyRef)
+    let msg = status == noErr ? "горячая клавиша \(name) готова" : "горячая клавиша \(name) занята другим приложением (\(status))"
+    FileHandle.standardError.write("HUD: \(msg)\n".data(using: .utf8)!)
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)  // no Dock icon, never takes focus
 let hud = HUD()
 
 let fifo = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : NSHomeDirectory() + "/jarvis/.hud"
-let bar = MenuBar(dir: (fifo as NSString).deletingLastPathComponent)
+let jarvisDir = (fifo as NSString).deletingLastPathComponent
+registerHotkey(readHotkey(jarvisDir))
+let bar = MenuBar(dir: jarvisDir)
 hud.onCancel = { bar.cancel() }
+onHotkey = { if hud.shown { bar.cancel() } else { bar.listen() } }
 Thread {
     let fd = open(fifo, O_RDWR)  // read+write: a FIFO opened like this never hits EOF between writers
     guard fd >= 0, let f = fdopen(fd, "r") else { exit(1) }
